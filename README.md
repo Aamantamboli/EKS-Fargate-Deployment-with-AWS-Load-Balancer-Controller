@@ -1,123 +1,253 @@
-# **EKS Fargate Deployment with AWS Load Balancer Controller**
+# EKS Fargate Deployment with AWS Load Balancer Controller
 
-This guide provides a comprehensive walkthrough for deploying a sample web application to a serverless Amazon EKS cluster using AWS Fargate and an AWS Load Balancer. The steps are based on the project explained in the YouTube video: [https://youtu.be/RRCrY12VY\_s](https://www.google.com/search?q=https://youtu.be/RRCrY12VY_s).
+This guide provides a comprehensive walkthrough for deploying a sample web application to a serverless Amazon EKS cluster using AWS Fargate and an AWS Load Balancer.
 
-## **Conceptual Overview**
+---
+
+## 📘 Conceptual Overview
 
 This project demonstrates a modern cloud deployment strategy using a combination of key AWS and Kubernetes technologies to create a scalable, highly available, and easily manageable application infrastructure.
 
-* **Amazon EKS (Elastic Kubernetes Service):** As a managed service for running Kubernetes, EKS abstracts away the complexity of managing the control plane. This means AWS handles the patching, scaling, and high availability of the Kubernetes master nodes, allowing developers and DevOps teams to focus on their applications rather than the underlying infrastructure. It provides a robust and secure foundation for containerized workloads.  
-* **AWS Fargate:** This serverless compute engine for containers works seamlessly with Amazon EKS. With Fargate, you don't need to provision, configure, or scale EC2 instances for your worker nodes. Instead, you simply define your pods, and Fargate automatically provisions the right amount of compute capacity to run your containers. This pay-as-you-go model for compute resources offers significant cost savings and operational simplicity, as you are billed only for the resources your containers consume.  
-* **AWS Load Balancer Controller:** This is a Kubernetes controller that directly manages AWS Elastic Load Balancers for a Kubernetes cluster. When you define a Kubernetes Ingress resource, this controller automatically provisions and configures a corresponding Application Load Balancer (ALB) in your AWS account. It intelligently routes external traffic from the internet to the correct services and pods within your EKS cluster, handling TLS termination and advanced routing rules, and ensuring high availability.  
-* **OIDC Identity Provider:** An OpenID Connect (OIDC) identity provider for your EKS cluster enables secure authentication between Kubernetes service accounts and AWS IAM. This allows pods running in the cluster to assume IAM roles and interact with other AWS services (like S3, DynamoDB, or the Load Balancer Controller itself) using temporary, scoped credentials without storing long-lived AWS keys within the pod. This practice significantly enhances the security of your cloud environment.
+- **Amazon EKS (Elastic Kubernetes Service):** Managed Kubernetes service that abstracts control plane management, offering scalability, security, and high availability out of the box.
+- **AWS Fargate:** Serverless compute engine for containers, eliminating the need to manage EC2 instances for Kubernetes worker nodes.
+- **AWS Load Balancer Controller:** Automatically provisions and configures Application Load Balancers (ALBs) in response to Kubernetes Ingress resources.
+- **OIDC Identity Provider:** Enables Kubernetes service accounts to securely assume AWS IAM roles using short-lived credentials.
 
-## **Prerequisites**
+---
+## 🏗️ **High-Level Architecture Overview**
 
-Before starting this project, ensure you have the following command-line tools installed and configured on your system. The latest versions are recommended for the best experience.
+```
+                          ┌────────────────────────────────────┐
+                          │        End User (Browser)         │
+                          └────────────────────────────────────┘
+                                       │
+                                       ▼
+                        ┌─────────────────────────────┐
+                        │  Application Load Balancer  │
+                        └─────────────────────────────┘
+                                       │
+                           (Ingress managed by ALB Controller)
+                                       │
+                                       ▼
+                      ┌────────────────────────────────────┐
+                      │        EKS Control Plane (AWS)     │
+                      └────────────────────────────────────┘
+                                       │
+                                       ▼
+            ┌──────────────────────────────────────────────────────┐
+            │             Fargate (Serverless Compute)             │
+            │  ┌──────────────────────────┐  ┌──────────────────┐  │
+            │  │ Pod: 2048 Game App       │  │ Pod: Other Pods  │  │
+            │  └──────────────────────────┘  └──────────────────┘  │
+            └──────────────────────────────────────────────────────┘
+                                       │
+                                       ▼
+        ┌────────────────────────────────────────────────────┐
+        │ Kubernetes Namespace: `game-2048`                  │
+        └────────────────────────────────────────────────────┘
 
-1. **AWS CLI:** The official command-line interface for managing AWS services.  
-2. **kubectl:** The standard command-line tool for interacting with Kubernetes clusters.  
-3. **eksctl:** A simple, high-level CLI for creating and managing EKS clusters.  
-4. **Helm:** The package manager for Kubernetes, used to deploy complex applications.
+        IAM & OIDC allow pods to securely access AWS services.
+```
 
-After installation, configure your AWS CLI with your credentials. This step is essential to grant the CLIs permission to create and manage resources in your AWS account.
+---
 
+## 🔧 Components
+
+* **End User:** Accesses the app via a public URL.
+* **ALB (Application Load Balancer):** Created by the AWS Load Balancer Controller in response to an Ingress resource.
+* **Ingress Resource:** Defined in Kubernetes to expose the 2048 game service externally.
+* **AWS Load Balancer Controller:** Monitors Kubernetes Ingresses and Services, and creates ALBs.
+* **EKS (Amazon Elastic Kubernetes Service):** Manages the Kubernetes control plane.
+* **AWS Fargate:** Runs the containerized workloads without EC2 nodes.
+* **IAM OIDC Provider:** Enables Kubernetes service accounts to assume IAM roles.
+
+---
+
+## ✅ Prerequisites
+
+Make sure you have the following tools installed and configured:
+
+- [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html)
+- [kubectl](https://kubernetes.io/docs/tasks/tools/)
+- [eksctl](https://docs.aws.amazon.com/eks/latest/userguide/eksctl.html)
+- [Helm](https://helm.sh/docs/intro/install/)
+
+> Configure AWS CLI using:
+```bash
 aws configure
+````
 
-## **Step-by-Step Deployment**
+---
 
-Follow these steps in order to deploy the 2048 game application to your EKS cluster, leveraging Fargate and the AWS Load Balancer Controller.
+## 🚀 Step-by-Step Deployment
 
-### **1\. Create the EKS Cluster with Fargate**
+### 1. Create the EKS Cluster with Fargate
 
-Use the eksctl command to create a new cluster. This command will provision a cluster named demo-cluster in the us-east-1 region with Fargate enabled. This process sets up the control plane, networking, and all necessary components, and it can take a significant amount of time (typically 15-20 minutes).
+```bash
+eksctl create cluster \
+  --name demo-cluster \
+  --region us-east-1 \
+  --fargate
+```
 
-eksctl create cluster \--name demo-cluster \--region us-east-1 \--fargate
+> 📌 This process typically takes 15-20 minutes.
 
-### **2\. Update kubeconfig**
+---
 
-After the cluster is created, it's crucial to update your local kubeconfig file. This command configures kubectl to point to your new EKS cluster, allowing you to run kubectl commands against it.
+### 2. Update kubeconfig
 
-aws eks update-kubeconfig \--name demo-cluster \--region ap-south-1
+```bash
+aws eks update-kubeconfig \
+  --name demo-cluster \
+  --region ap-south-1
+```
 
-### **3\. Create a Fargate Profile**
+> ✅ Ensures `kubectl` communicates with your new cluster.
 
-Create a Fargate profile for the application's namespace (game-2048). This profile tells EKS that any pods deployed to this namespace should be scheduled on Fargate instead of on a self-managed worker node. This is a key step in enabling the serverless functionality of Fargate.
+---
 
-eksctl create fargateprofile \\  
-    \--cluster demo-cluster \\  
-    \--region ap-south-1 \\  
-    \--name alb-sample-app \\  
-    \--namespace game-2048
+### 3. Create a Fargate Profile
 
-### **4\. Deploy the 2048 Game Application**
+```bash
+eksctl create fargateprofile \
+  --cluster demo-cluster \
+  --region ap-south-1 \
+  --name alb-sample-app \
+  --namespace game-2048
+```
 
-Apply the Kubernetes manifest file for the 2048 game directly from its GitHub repository. This single command creates the Deployment and Service objects needed to run the application in your cluster.
+---
 
-kubectl apply \-f \[https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.5.4/docs/examples/2048/2048\_full.yaml\](https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.5.4/docs/examples/2048/2048\_full.yaml)
+### 4. Deploy the 2048 Game Application
 
-After applying the manifest, verify that the pods, services, and ingress are created successfully using these kubectl commands.
+```bash
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.5.4/docs/examples/2048/2048_full.yaml
+```
 
-kubectl get pods \-n game-2048   
-kubectl get svc \-n game-2048  
-kubectl get ingress \-n game-2048
+> ✅ Verify resources:
 
-### **5\. Attach the OIDC Provider**
+```bash
+kubectl get pods -n game-2048
+kubectl get svc -n game-2048
+kubectl get ingress -n game-2048
+```
 
-This step associates an IAM OIDC provider with your cluster. This identity provider allows Kubernetes service accounts to assume IAM roles, which is a key security best practice for granting permissions to applications.
+---
 
-eksctl utils associate-iam-oidc-provider \--cluster demo-cluster \--approve
+### 5. Attach the OIDC Provider
 
-### **6\. Create IAM Policy and Role for the Load Balancer Controller**
+```bash
+eksctl utils associate-iam-oidc-provider \
+  --cluster demo-cluster \
+  --approve
+```
 
-The AWS Load Balancer Controller requires specific IAM permissions to create and manage ALBs in your AWS account. You must create an IAM policy and an IAM role with the necessary permissions.
+---
 
-First, download the official IAM policy JSON file:
+### 6. Create IAM Policy and Role for Load Balancer Controller
 
-curl \-O \[https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.11.0/docs/install/iam\_policy.json\](https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.11.0/docs/install/iam\_policy.json)
+#### a. Download IAM Policy
 
-Next, create the IAM policy in your AWS account using the downloaded file:
+```bash
+curl -O https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.11.0/docs/install/iam_policy.json
+```
 
-aws iam create-policy \\  
-    \--policy-name AWSLoadBalancerControllerIAMPolicy \\  
-    \--policy-document file://iam\_policy.json
+#### b. Create IAM Policy
 
-Finally, create a Kubernetes service account and an IAM role for the controller, and attach the policy to the role. **Remember to replace \<your-cluster-name\> and \<your\_account\_id\> with your actual values.**
+```bash
+aws iam create-policy \
+  --policy-name AWSLoadBalancerControllerIAMPolicy \
+  --policy-document file://iam_policy.json
+```
 
-eksctl create iamserviceaccount \\  
-  \--cluster=\<your-cluster-name\> \\  
-  \--namespace=kube-system \\  
-  \--name=aws-load-balancer-controller \\  
-  \--role-name AmazonEKSLoadBalancerControllerRole \\  
-  \--attach-policy-arn=arn:aws:iam::\<your\_account\_id\>:policy/AWSLoadBalancerControllerIAMPolicy \\  
-  \--approve
+#### c. Create IAM Role and Kubernetes Service Account
 
-### **7\. Install the AWS Load Balancer Controller**
+Replace placeholders:
 
-Use Helm, the Kubernetes package manager, to install the AWS Load Balancer Controller. This will deploy the controller into the kube-system namespace. Once installed, it will automatically detect the Ingress resource created in step 4 and provision an ALB.
+* `<your-cluster-name>`
+* `<your_account_id>`
 
-helm repo add eks \[https://aws.github.io/eks-charts\](https://aws.github.io/eks-charts)  
-helm repo update eks  
-helm install aws-load-balancer-controller eks/aws-load-balancer-controller \-n kube-system \\  
-    \--set clusterName=\<your-cluster-name\> \\  
-    \--set serviceAccount.create=false \\  
-    \--set serviceAccount.name=aws-load-balancer-controller \\  
-    \--set region=\<your-region\> \\  
-    \--set vpcId=\<your-vpc-id\>
+```bash
+eksctl create iamserviceaccount \
+  --cluster=<your-cluster-name> \
+  --namespace=kube-system \
+  --name=aws-load-balancer-controller \
+  --role-name AmazonEKSLoadBalancerControllerRole \
+  --attach-policy-arn=arn:aws:iam::<your_account_id>:policy/AWSLoadBalancerControllerIAMPolicy \
+  --approve
+```
 
-After installation, verify that the deployment is successful. You should see a READY status of 1/1 or 2/2 for the aws-load-balancer-controller deployment.
+---
 
-### **8\. Access the Application**
+### 7. Install AWS Load Balancer Controller via Helm
 
-Once the controller has finished provisioning the ALB, the Ingress resource will be updated with a public hostname. Get the hostname to access your application.
+Replace placeholders:
 
-kubectl get ingress \-n game-2048
+* `<your-cluster-name>`
+* `<your-region>`
+* `<your-vpc-id>`
 
-Copy the address from the output (e.g., k8s-game2048-ingress2-bcac0b5b37-1186747725.ap-south-1.elb.amazonaws.com) and paste it into your browser to play the game. You can also verify that the load balancer was created in the AWS console under EC2 \> Load Balancers.
+```bash
+helm repo add eks https://aws.github.io/eks-charts
+helm repo update
 
-## **Cleanup**
+helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+  -n kube-system \
+  --set clusterName=<your-cluster-name> \
+  --set serviceAccount.create=false \
+  --set serviceAccount.name=aws-load-balancer-controller \
+  --set region=<your-region> \
+  --set vpcId=<your-vpc-id>
+```
 
-To avoid incurring unexpected costs, it is critical to clean up all the resources you have created in this project. The simplest way to do this is to use the eksctl delete cluster command. This command will delete the EKS cluster and all associated resources, including the Fargate profiles, load balancers, and IAM roles created during the deployment process.
+> ✅ Confirm controller deployment:
 
-eksctl delete cluster \--name demo-cluster \--region us-east-1
+```bash
+kubectl get deployment aws-load-balancer-controller -n kube-system
+```
 
+---
+
+### 8. Access the Application
+
+Get the Ingress hostname:
+
+```bash
+kubectl get ingress -n game-2048
+```
+
+Visit the URL shown under `ADDRESS`, for example:
+
+```
+k8s-game2048-ingress2-bcac0b5b37-1186747725.ap-south-1.elb.amazonaws.com
+```
+
+Paste it into your browser to access the 2048 game.
+
+---
+
+## 🧹 Cleanup
+
+To avoid incurring costs:
+
+```bash
+eksctl delete cluster --name demo-cluster --region us-east-1
+```
+
+This command deletes the EKS cluster and all associated resources including:
+
+* Fargate profiles
+* Load balancers
+* IAM roles
+* Application workloads
+
+---
+
+## 📂 Resources
+
+* [AWS EKS Documentation](https://docs.aws.amazon.com/eks/)
+* [AWS Load Balancer Controller](https://kubernetes-sigs.github.io/aws-load-balancer-controller/)
+* [Fargate on EKS](https://docs.aws.amazon.com/eks/latest/userguide/fargate.html)
+* [Helm Charts](https://artifacthub.io/packages/search?repo=eks)
+
+---
